@@ -217,7 +217,11 @@ public final class Prefs {
             }
             new SavedDeviceBuilder(name).setEcid(getEcid()).setSavePath(getSavePath()).setIdentifier(getIdentifier())
                     .setBoardConfig(getBoardConfig().orElse(null)).setApnonce(getApnonce().orElse(null))
-                    .setGenerator(getGenerator().orElse(null)).setIncludeBetas(doesIncludeBetas()).save().setBackground(isBackground());
+                    .setGenerator(getGenerator().orElse(null)).setIncludeBetas(doesIncludeBetas())
+                    .setIncludeCryptex1(doesIncludeCryptex1())
+                    .setCryptex1Nonce(getCryptex1Nonce().orElse(null))
+                    .setCryptex1Seed(getCryptex1Seed().orElse(null))
+                    .save().setBackground(isBackground());
             delete();
         }
 
@@ -281,6 +285,30 @@ public final class Prefs {
             node.putBoolean("Include Betas", includeBetas);
         }
 
+        public boolean doesIncludeCryptex1() {
+            return node.getBoolean("Include Cryptex1", true);
+        }
+
+        public void setIncludeCryptex1(boolean includeCryptex1) {
+            node.putBoolean("Include Cryptex1", includeCryptex1);
+        }
+
+        public Optional<String> getCryptex1Nonce() {
+            return Optional.ofNullable(node.get("Cryptex1 Nonce", null));
+        }
+
+        public void setCryptex1Nonce(String cryptex1Nonce) {
+            node.put("Cryptex1 Nonce", cryptex1Nonce);
+        }
+
+        public Optional<String> getCryptex1Seed() {
+            return Optional.ofNullable(node.get("Cryptex1 Seed", null));
+        }
+
+        public void setCryptex1Seed(String cryptex1Seed) {
+            node.put("Cryptex1 Seed", cryptex1Seed);
+        }
+
         public boolean isBackground() {
             return node.getBoolean("Save in background", false);
         }
@@ -308,8 +336,8 @@ public final class Prefs {
     @SuppressWarnings("UnusedReturnValue")
     public static class SavedDeviceBuilder {
         private final String name;
-        private String ecid, savePath, identifier, boardConfig, apnonce, generator;
-        private boolean includeBetas;
+        private String ecid, savePath, identifier, boardConfig, apnonce, generator, cryptex1Nonce, cryptex1Seed;
+        private boolean includeBetas, includeCryptex1 = true;
 
         public SavedDeviceBuilder(String name) {
             this.name = name;
@@ -350,12 +378,28 @@ public final class Prefs {
             return this;
         }
 
+        public SavedDeviceBuilder setIncludeCryptex1(boolean includeCryptex1) {
+            this.includeCryptex1 = includeCryptex1;
+            return this;
+        }
+
+        public SavedDeviceBuilder setCryptex1Nonce(String cryptex1Nonce) {
+            this.cryptex1Nonce = cryptex1Nonce;
+            return this;
+        }
+
+        public SavedDeviceBuilder setCryptex1Seed(String cryptex1Seed) {
+            this.cryptex1Seed = cryptex1Seed;
+            return this;
+        }
+
         public SavedDevice save() {
             SavedDevice device = new SavedDevice(Objects.requireNonNull(name, "Device Name"));
             device.setEcid(Objects.requireNonNull(ecid, "ECID"));
             device.setSavePath(Objects.requireNonNull(savePath, "Save Path"));
             device.setIdentifier(Objects.requireNonNull(identifier, "Identifier"));
             device.setIncludeBetas(includeBetas);
+            device.setIncludeCryptex1(includeCryptex1);
             if (boardConfig != null) {
                 device.setBoardConfig(boardConfig);
             }
@@ -364,6 +408,12 @@ public final class Prefs {
             }
             if (generator != null) {
                 device.setGenerator(generator);
+            }
+            if (cryptex1Nonce != null) {
+                device.setCryptex1Nonce(cryptex1Nonce);
+            }
+            if (cryptex1Seed != null) {
+                device.setCryptex1Seed(cryptex1Seed);
             }
 
             if (!savedDevicesList.contains(device)) {

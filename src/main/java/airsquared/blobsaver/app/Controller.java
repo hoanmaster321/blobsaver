@@ -55,11 +55,11 @@ public class Controller {
 
     @FXML private ComboBox<String> deviceTypeChoiceBox, deviceModelChoiceBox;
 
-    @FXML private TextField ecidField, boardConfigField, apnonceField, generatorField, versionField, identifierField,
-            pathField, ipswField;
+    @FXML private TextField ecidField, boardConfigField, apnonceField, generatorField, cryptexNonceField, cryptexSeedField,
+            versionField, identifierField, pathField, ipswField;
     private String deviceName;
 
-    @FXML private CheckBox apnonceCheckBox, allSignedVersionsCheckBox, identifierCheckBox, betaCheckBox,
+    @FXML private CheckBox apnonceCheckBox, cryptexCheckBox, allSignedVersionsCheckBox, identifierCheckBox, betaCheckBox,
             manualURLCheckBox, saveToTSSSaverCheckBox, saveToSHSHHostCheckBox;
 
     @FXML private Label versionLabel, savedDevicesLabel;
@@ -148,6 +148,14 @@ public class Controller {
         }
     }
 
+    public void cryptexCheckBoxHandler() {
+        if (!cryptexCheckBox.isSelected()) {
+            cryptexNonceField.setEffect(null);
+            cryptexNonceField.setText("");
+            cryptexSeedField.setText("");
+        }
+    }
+
     public void versionCheckBoxHandler() {
         if (allSignedVersionsCheckBox.isSelected()) {
             versionField.setEffect(null);
@@ -224,6 +232,9 @@ public class Controller {
             apnonceField.setText(a);
             savedDevice.getGenerator().ifPresent(generatorField::setText);
         });
+        Utils.setSelectedFire(cryptexCheckBox, savedDevice.doesIncludeCryptex1());
+        savedDevice.getCryptex1Nonce().ifPresent(cryptexNonceField::setText);
+        savedDevice.getCryptex1Seed().ifPresent(cryptexSeedField::setText);
     }
 
     public void saveDeviceHandler() {
@@ -245,6 +256,7 @@ public class Controller {
             Prefs.SavedDeviceBuilder builder = new Prefs.SavedDeviceBuilder(result);
 
             builder.setEcid(ecidField.getText()).setSavePath(pathField.getText()).setIncludeBetas(betaCheckBox.isSelected())
+                    .setIncludeCryptex1(cryptexCheckBox.isSelected())
                     .setIdentifier(identifierField.isDisabled() ?
                             Devices.modelToIdentifier(deviceModelChoiceBox.getValue()) : identifierField.getText());
             if (!boardConfigField.isDisable()) {
@@ -254,6 +266,14 @@ public class Controller {
                 builder.setApnonce(apnonceField.getText());
                 if (!Utils.isEmptyOrNull(generatorField.getText())) {
                     builder.setGenerator(generatorField.getText());
+                }
+            }
+            if (cryptexCheckBox.isSelected()) {
+                if (!Utils.isEmptyOrNull(cryptexNonceField.getText())) {
+                    builder.setCryptex1Nonce(cryptexNonceField.getText());
+                }
+                if (!Utils.isEmptyOrNull(cryptexSeedField.getText())) {
+                    builder.setCryptex1Seed(cryptexSeedField.getText());
                 }
             }
             builder.save();
@@ -661,6 +681,7 @@ public class Controller {
                         identifierField.getText() : Devices.modelToIdentifier(deviceModelChoiceBox.getValue()))
                 .setEcid(ecidField.getText()).setSavePath(pathField.getText())
                 .setIncludeBetas(betaCheckBox.isSelected())
+                .setIncludeCryptex1(cryptexCheckBox.isSelected())
                 .saveToTSSSaver(saveToTSSSaverCheckBox.isSelected())
                 .saveToSHSHHost(saveToSHSHHostCheckBox.isSelected());
         if (!boardConfigField.isDisabled()) {
@@ -675,6 +696,14 @@ public class Controller {
             builder.setApnonce(apnonceField.getText());
             if (!Utils.isEmptyOrNull(generatorField.getText())) {
                 builder.setGenerator(generatorField.getText());
+            }
+        }
+        if (cryptexCheckBox.isSelected()) {
+            if (!Utils.isEmptyOrNull(cryptexNonceField.getText())) {
+                builder.setCryptex1Nonce(cryptexNonceField.getText());
+            }
+            if (!Utils.isEmptyOrNull(cryptexSeedField.getText())) {
+                builder.setCryptex1Seed(cryptexSeedField.getText());
             }
         }
 
@@ -713,6 +742,8 @@ public class Controller {
                 ecidField.setEffect(Utils.errorBorder);
             } else if (message.contains("not a valid APNonce")) {
                 apnonceField.setEffect(Utils.errorBorder);
+            } else if (message.contains("not a valid Cryptex1 Nonce")) {
+                cryptexNonceField.setEffect(Utils.errorBorder);
             } else if (message.contains("not a valid path")) {
                 pathField.setEffect(Utils.errorBorder);
             } else if (message.contains("not being signed") && manualURLCheckBox.isSelected()) {

@@ -22,20 +22,33 @@ import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import javafx.concurrent.Task;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.StringJoiner;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -51,6 +64,25 @@ public class TSS extends Task<String> {
 
     private static final Pattern ipswURLPattern = Pattern.compile("(https?://|file:/).*\\.(ipsw|plist)");
     private static final Pattern versionPattern = Pattern.compile("[0-9]+\\.[0-9]+\\.?[0-9]*(?<!\\.)");
+    private static final Pattern hex64Pattern = Pattern.compile("[0-9a-fA-F]{64}");
+    private static final Pattern cryptexSeedPattern = Pattern.compile("(0x)?[0-9a-fA-F]{16,32}");
+
+    /**
+     * Default Cryptex1 nonce (all-zero seed SHA256: 0x00000000000000000000000000000000 -> 3f4fba536679e5a34cb2f9e656bca1cd704cc5490420807f10e82698ad9622e4)
+     */
+    public static final String DEFAULT_CRYPTEX1_NONCE = "3f4fba536679e5a34cb2f9e656bca1cd704cc5490420807f10e82698ad9622e4";
+
+    private static final String[] CRYPTEX1_MANIFEST_KEYS = {
+            "Cryptex1,ChipID",
+            "Cryptex1,Type",
+            "Cryptex1,SubType",
+            "Cryptex1,ProductClass",
+            "Cryptex1,UseProductClass",
+            "Cryptex1,NonceDomain",
+            "Cryptex1,Version",
+            "Cryptex1,PreauthorizationVersion",
+            "Cryptex1,FakeRoot"
+    };
 
     private final String name;
     private final String deviceIdentifier;
@@ -65,12 +97,18 @@ public class TSS extends Task<String> {
 
     private final String apnonce, generator;
 
+    private final boolean includeCryptex1;
+    private final String cryptex1Nonce, cryptex1Seed;
+
     private final boolean saveToTSSSaver, saveToSHSHHost;
 
     /**
      * Private constructor; use {@link TSS.Builder} instead
      */
-    private TSS(String name, String deviceIdentifier, String ecid, String savePath, String boardConfig, boolean includeBetas, String manualVersion, String manualIpswURL, String apnonce, String generator, boolean saveToTSSSaver, boolean saveToSHSHHost) {
+    private TSS(String name, String deviceIdentifier, String ecid, String savePath, String boardConfig,
+                boolean includeBetas, String manualVersion, String manualIpswURL, String apnonce, String generator,
+                boolean includeCryptex1, String cryptex1Nonce, String cryptex1Seed,
+                boolean saveToTSSSaver, boolean saveToSHSHHost) {
         this.name = name;
         this.deviceIdentifier = deviceIdentifier;
         this.ecid = ecid;
@@ -80,6 +118,9 @@ public class TSS extends Task<String> {
         this.manualIpswURL = manualIpswURL;
         this.apnonce = apnonce;
         this.generator = generator;
+        this.includeCryptex1 = includeCryptex1;
+        this.cryptex1Nonce = cryptex1Nonce;
+        this.cryptex1Seed = cryptex1Seed;
         this.saveToTSSSaver = saveToTSSSaver;
         this.saveToSHSHHost = saveToSHSHHost;
         this.savePath = parsePath(savePath);
@@ -174,8 +215,19 @@ public class TSS extends Task<String> {
         var versionStringOnly = ios.versionString().trim().replaceFirst(" .*", ""); // strip out 'beta' labels
         // https://github.com/1Conan/tsschecker/blob/0bc6174c3c2f77a0de525b71e7d8ec0987f07aa1/tsschecker/tsschecker.c#L1262
         String fileName = parseECID() + "_" + deviceIdentifier + "_" + getBoardConfig() + "_" + versionStringOnly + "-" + ios.buildid() + "_" + apnonce + ".shsh2";
+        Path shshPath = Path.of(parsePathWithVersion(ios), fileName);
 
-        if (Files.exists(Path.of(parsePathWithVersion(ios), fileName))) {
+        if (Files.exists(shshPath)) {
+            if (includeCryptex1) {
+                try {
+                    String content = Files.readString(shshPath, StandardCharsets.UTF_8);
+                    if (!content.contains("<key>Cryptex1,Ticket</key>")) {
+                        return false;
+                    }
+                } catch (IOException e) {
+                    return false;
+                }
+            }
             System.out.println("Already Saved: " + fileName);
             return true;
         }
@@ -230,21 +282,214 @@ public class TSS extends Task<String> {
         } catch (IOException e) {
             throw new TSSException("Unable to extract BuildManifest.", true, e);
         }
+        Path targetDir = Path.of(parsePathWithVersion(iosVersion));
         try {
-            args.set(pathIndex, parsePathWithVersion(iosVersion));
-            Files.createDirectories(Path.of(args.get(pathIndex)));
+            args.set(pathIndex, targetDir.toString());
+            Files.createDirectories(targetDir);
         } catch (IOException e) {
             throw new TSSException("Unable to create save directory. Try with a different save path. If you are using variables, make sure they are spelled correctly.", false, e);
         }
         try {
             System.out.println("Running: " + args);
-            String tssLog = executeProgram(args);
+            String tssLog = executeProgram(args, !includeCryptex1);
+            if (includeCryptex1) {
+                tssLog.lines()
+                        .filter(l -> l.startsWith("[") || l.startsWith("Version:") || l.startsWith("Saved shsh") || l.startsWith("IS "))
+                        .forEach(System.out::println);
+            }
             parseTSSLog(tssLog);
+            if (includeCryptex1) {
+                injectCryptex1Ticket(manifest, tssLog, targetDir, iosVersion);
+            }
         } catch (IOException e) {
             throw new TSSException("There was an error starting tsschecker.", true, e);
         } finally {
             deleteIfPossible(manifest);
         }
+    }
+
+    private void injectCryptex1Ticket(Path manifestPath, String tssLog, Path saveDir, Utils.IOSVersion iosVersion) throws TSSException {
+        try {
+            String manifestXml = Files.readString(manifestPath, StandardCharsets.UTF_8);
+            if (!manifestXml.contains("<key>Cryptex1,")) {
+                System.out.println("BuildManifest does not contain Cryptex1 components; skipping Cryptex1,Ticket.");
+                return;
+            }
+
+            // Extract printed TSS request plist from tsschecker output
+            Matcher reqMatcher = Pattern.compile("(<\\?xml version=\"1\\.0\" encoding=\"UTF-8\"\\?>[\\s\\S]*?</plist>)").matcher(tssLog);
+            if (!reqMatcher.find()) {
+                throw new TSSException("Unable to extract TSS request from tsschecker output for Cryptex1,Ticket.", true, tssLog);
+            }
+            String baseTssRequest = reqMatcher.group(1);
+
+            long apChipId = extractIntegerKey(baseTssRequest, "ApChipID");
+            long apBoardId = extractIntegerKey(baseTssRequest, "ApBoardID");
+            long apEcid = extractIntegerKey(baseTssRequest, "ApECID");
+
+            String buildIdentityXml = findMatchingBuildIdentity(manifestXml, apChipId, apBoardId);
+            if (buildIdentityXml == null) {
+                throw new TSSException("Could not find matching BuildIdentity in BuildManifest for Cryptex1,Ticket.", true, tssLog);
+            }
+
+            // Build Cryptex1,UDID (16 bytes: 8-byte big-endian ApChipID + 8-byte big-endian ApECID)
+            byte[] udidBytes = ByteBuffer.allocate(16).putLong(apChipId).putLong(apEcid).array();
+            String udidB64 = Base64.getEncoder().encodeToString(udidBytes);
+
+            // Build Cryptex1,Nonce (32 bytes)
+            String nonceHex = (cryptex1Nonce != null && !cryptex1Nonce.isBlank())
+                    ? cryptex1Nonce.trim()
+                    : DEFAULT_CRYPTEX1_NONCE;
+            byte[] nonceBytes = HexFormat.of().parseHex(nonceHex);
+            String nonceB64 = Base64.getEncoder().encodeToString(nonceBytes);
+
+            var extraTags = new StringBuilder();
+            extraTags.append("\t<key>@Cryptex1,Ticket</key>\n\t<true/>\n");
+            extraTags.append("\t<key>Cryptex1,ProductionMode</key>\n\t<true/>\n");
+            extraTags.append("\t<key>Cryptex1,UDID</key>\n\t<data>\n\t").append(udidB64).append("\n\t</data>\n");
+            extraTags.append("\t<key>Cryptex1,Nonce</key>\n\t<data>\n\t").append(nonceB64).append("\n\t</data>\n");
+
+            for (String key : CRYPTEX1_MANIFEST_KEYS) {
+                if (!baseTssRequest.contains("<key>" + key + "</key>")) {
+                    String kvXml = extractRawPlistKeyValue(buildIdentityXml, key);
+                    if (kvXml != null) {
+                        extraTags.append("\t").append(kvXml).append("\n");
+                    }
+                }
+            }
+
+            int lastDictClose = baseTssRequest.lastIndexOf("</dict>");
+            if (lastDictClose < 0) {
+                throw new TSSException("Malformed TSS request plist.", true, tssLog);
+            }
+            String cryptexTssRequest = baseTssRequest.substring(0, lastDictClose)
+                    + extraTags
+                    + baseTssRequest.substring(lastDictClose);
+
+            String tssResponse = postAppleTSS(cryptexTssRequest);
+            if (!tssResponse.contains("STATUS=0&MESSAGE=SUCCESS")) {
+                throw new TSSException("Apple TSS refused Cryptex1,Ticket request: " + tssResponse, true, tssResponse);
+            }
+
+            Matcher ticketMatcher = Pattern.compile("(<key>Cryptex1,Ticket</key>\\s*<data>[\\s\\S]*?</data>)").matcher(tssResponse);
+            if (!ticketMatcher.find()) {
+                throw new TSSException("Apple TSS response did not contain Cryptex1,Ticket.", true, tssResponse);
+            }
+            String cryptexTicketEntry = ticketMatcher.group(1);
+
+            Path shshFile = findSavedShshFile(saveDir, iosVersion);
+            if (shshFile == null || !Files.exists(shshFile)) {
+                throw new TSSException("Could not locate saved .shsh2 file to insert Cryptex1,Ticket.", true, tssLog);
+            }
+
+            String shshContent = Files.readString(shshFile, StandardCharsets.UTF_8);
+            if (!shshContent.contains("<key>Cryptex1,Ticket</key>")) {
+                shshContent = shshContent.replaceAll(
+                        "(<key>ApImg4Ticket</key>\\s*<data>[\\s\\S]*?</data>)",
+                        "$1\n\t" + Matcher.quoteReplacement(cryptexTicketEntry)
+                );
+            }
+            if (cryptex1Seed != null && !cryptex1Seed.isBlank() && !shshContent.contains("<key>cryptex1Generator</key>")) {
+                String normalizedSeed = cryptex1Seed.trim().startsWith("0x") ? cryptex1Seed.trim() : "0x" + cryptex1Seed.trim();
+                shshContent = shshContent.replaceFirst(
+                        "(<key>generator</key>\\s*<string>[^<]*</string>)",
+                        "$1\n\t<key>cryptex1Generator</key>\n\t<string>" + Matcher.quoteReplacement(normalizedSeed) + "</string>"
+                );
+            }
+            Files.writeString(shshFile, shshContent, StandardCharsets.UTF_8);
+            System.out.println("Successfully injected Cryptex1,Ticket into " + shshFile.getFileName());
+        } catch (IOException | InterruptedException e) {
+            throw new TSSException("Failed to fetch or save Cryptex1,Ticket.", true, e);
+        }
+    }
+
+    private Path findSavedShshFile(Path saveDir, Utils.IOSVersion iosVersion) throws IOException {
+        String prefix = parseECID() + "_" + deviceIdentifier + "_" + getBoardConfig() + "_";
+        if (iosVersion.versionString() != null && iosVersion.buildid() != null && apnonce != null) {
+            var versionStringOnly = iosVersion.versionString().trim().replaceFirst(" .*", "");
+            Path exact = saveDir.resolve(prefix + versionStringOnly + "-" + iosVersion.buildid() + "_" + apnonce + ".shsh2");
+            if (Files.exists(exact)) {
+                return exact;
+            }
+        }
+        try (Stream<Path> files = Files.list(saveDir)) {
+            return files
+                    .filter(p -> p.getFileName().toString().startsWith(prefix) && p.getFileName().toString().endsWith(".shsh2"))
+                    .max(Comparator.comparingLong(p -> p.toFile().lastModified()))
+                    .orElse(null);
+        }
+    }
+
+    private static long extractIntegerKey(String plistXml, String key) throws TSSException {
+        Matcher m = Pattern.compile("<key>" + Pattern.quote(key) + "</key>\\s*<integer>\\s*([^<\\s]+)\\s*</integer>").matcher(plistXml);
+        if (!m.find()) {
+            throw new TSSException("Missing integer key " + key + " in TSS request.", true, plistXml);
+        }
+        return Long.parseLong(m.group(1));
+    }
+
+    private static String findMatchingBuildIdentity(String manifestXml, long apChipId, long apBoardId) {
+        int idx = manifestXml.indexOf("<key>BuildIdentities</key>");
+        if (idx < 0) return null;
+        String sub = manifestXml.substring(idx);
+        String[] parts = sub.split("<key>ApBoardID</key>");
+        for (int i = 1; i < parts.length; i++) {
+            String block = "<key>ApBoardID</key>" + parts[i];
+            Long bId = extractHexOrIntString(block, "ApBoardID");
+            Long cId = extractHexOrIntString(block, "ApChipID");
+            if (bId != null && cId != null && bId == apBoardId && cId == apChipId) {
+                return block;
+            }
+        }
+        return parts.length > 1 ? "<key>ApBoardID</key>" + parts[1] : null;
+    }
+
+    private static Long extractHexOrIntString(String xml, String key) {
+        Matcher m = Pattern.compile("<key>" + Pattern.quote(key) + "</key>\\s*<(?:string|integer)>\\s*([^<\\s]+)\\s*</(?:string|integer)>").matcher(xml);
+        if (!m.find()) return null;
+        String val = m.group(1);
+        try {
+            return val.startsWith("0x") || val.startsWith("0X")
+                    ? Long.parseUnsignedLong(val.substring(2), 16)
+                    : Long.parseLong(val);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private static String extractRawPlistKeyValue(String xml, String key) {
+        Matcher m = Pattern.compile("(<key>" + Pattern.quote(key) + "</key>\\s*(?:<true/>|<false/>|<(?:string|integer|data)>[\\s\\S]*?</(?:string|integer|data)>))").matcher(xml);
+        return m.find() ? m.group(1) : null;
+    }
+
+    private static String postAppleTSS(String requestXml) throws IOException, InterruptedException {
+        HttpClient client;
+        try {
+            TrustManager[] trustAll = new TrustManager[]{
+                    new X509TrustManager() {
+                        @Override
+                        public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+                        @Override
+                        public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+                        @Override
+                        public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+                    }
+            };
+            SSLContext sc = SSLContext.getInstance("TLS");
+            sc.init(null, trustAll, new SecureRandom());
+            client = HttpClient.newBuilder().sslContext(sc).build();
+        } catch (Exception e) {
+            client = HttpClient.newHttpClient();
+        }
+
+        HttpRequest request = HttpRequest.newBuilder(URI.create("https://gs.apple.com/TSS/controller?action=2"))
+                .header("Content-Type", "text/xml; charset=\"utf-8\"")
+                .header("User-Agent", "InetURL/1.0")
+                .POST(HttpRequest.BodyPublishers.ofString(requestXml, StandardCharsets.UTF_8))
+                .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        return response.body();
     }
 
     private void deleteIfPossible(Path file) {
@@ -262,6 +507,14 @@ public class TSS extends Task<String> {
         }
         if (boardConfig == null && Devices.doesRequireBoardConfig(deviceIdentifier)) {
             throw new TSSException("A board configuration is required for this device.", false);
+        }
+        if (includeCryptex1 && cryptex1Nonce != null && !cryptex1Nonce.isBlank()
+                && !hex64Pattern.matcher(cryptex1Nonce.trim()).matches()) {
+            throw new TSSException("\"" + cryptex1Nonce + "\" is not a valid Cryptex1 Nonce", false);
+        }
+        if (includeCryptex1 && cryptex1Seed != null && !cryptex1Seed.isBlank()
+                && !cryptexSeedPattern.matcher(cryptex1Seed.trim()).matches()) {
+            throw new TSSException("\"" + cryptex1Seed + "\" is not a valid Cryptex1 Seed", false);
         }
         if (manualIpswURL != null) { // check URL
             try {
@@ -324,7 +577,7 @@ public class TSS extends Task<String> {
     }
 
     private ArrayList<String> constructArgs() {
-        var args = new ArrayList<String>(17);
+        var args = new ArrayList<String>(18);
         String tsscheckerPath = Utils.getTsschecker().getAbsolutePath();
         Collections.addAll(args, tsscheckerPath, "--nocache", "--save", "--device", deviceIdentifier, "--ecid", ecid);
         Collections.addAll(args, "--boardconfig", getBoardConfig());
@@ -335,6 +588,9 @@ public class TSS extends Task<String> {
             }
         } else {
             Collections.addAll(args, "--generator", "0x1111111111111111");
+        }
+        if (includeCryptex1) {
+            args.add("--print-tss-request");
         }
 
         Collections.addAll(args, "--save-path", "will be replaced in loop",
@@ -386,6 +642,8 @@ public class TSS extends Task<String> {
     @SuppressWarnings("UnusedReturnValue")
     public static class Builder {
         private String name, device, ecid, savePath, boardConfig, manualVersion, manualIpswURL, apnonce, generator;
+        private String cryptex1Nonce, cryptex1Seed;
+        private boolean includeCryptex1 = true;
         private boolean includeBetas, saveToTSSSaver, saveToSHSHHost;
 
         public Builder setName(String name) {
@@ -435,6 +693,21 @@ public class TSS extends Task<String> {
             return this;
         }
 
+        public Builder setIncludeCryptex1(boolean includeCryptex1) {
+            this.includeCryptex1 = includeCryptex1;
+            return this;
+        }
+
+        public Builder setCryptex1Nonce(String cryptex1Nonce) {
+            this.cryptex1Nonce = cryptex1Nonce;
+            return this;
+        }
+
+        public Builder setCryptex1Seed(String cryptex1Seed) {
+            this.cryptex1Seed = cryptex1Seed;
+            return this;
+        }
+
         public Builder setIncludeBetas(boolean includeBetas) {
             this.includeBetas = includeBetas;
             return this;
@@ -455,7 +728,8 @@ public class TSS extends Task<String> {
                     Objects.requireNonNull(device, "Device"),
                     Objects.requireNonNull(ecid, "ECID"),
                     Objects.requireNonNull(savePath, "Save Path"),
-                    boardConfig, includeBetas, manualVersion, manualIpswURL, apnonce, generator, saveToTSSSaver, saveToSHSHHost);
+                    boardConfig, includeBetas, manualVersion, manualIpswURL, apnonce, generator,
+                    includeCryptex1, cryptex1Nonce, cryptex1Seed, saveToTSSSaver, saveToSHSHHost);
         }
     }
 

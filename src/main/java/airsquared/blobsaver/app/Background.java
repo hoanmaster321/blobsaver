@@ -285,10 +285,13 @@ class Background {
         TSS.Builder builder = new TSS.Builder().setName(savedDevice.getName())
                 .setDevice(savedDevice.getIdentifier())
                 .setEcid(savedDevice.getEcid()).setSavePath(savedDevice.getSavePath())
-                .setIncludeBetas(savedDevice.doesIncludeBetas());
+                .setIncludeBetas(savedDevice.doesIncludeBetas())
+                .setIncludeCryptex1(savedDevice.doesIncludeCryptex1());
         savedDevice.getBoardConfig().ifPresent(builder::setBoardConfig);
         savedDevice.getApnonce().ifPresent(builder::setApnonce);
         savedDevice.getGenerator().ifPresent(builder::setGenerator);
+        savedDevice.getCryptex1Nonce().ifPresent(builder::setCryptex1Nonce);
+        savedDevice.getCryptex1Seed().ifPresent(builder::setCryptex1Seed);
 
         try {
             builder.build().call();

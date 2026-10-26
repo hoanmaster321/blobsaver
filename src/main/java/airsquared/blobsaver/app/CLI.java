@@ -91,6 +91,16 @@ public class CLI implements Callable<Void> {
     @Option(names = "--generator")
     String generator;
 
+    @Option(names = "--include-cryptex1", negatable = true, defaultValue = "true", fallbackValue = "true",
+            description = "Include Cryptex1,Ticket in saved blobs (enabled by default).")
+    boolean includeCryptex1 = true;
+
+    @Option(names = "--cryptex1-nonce", paramLabel = "<nonce>", description = "Specify Cryptex1 Nonce in hex.")
+    String cryptex1Nonce;
+
+    @Option(names = "--cryptex1-seed", paramLabel = "<seed>", description = "Specify Cryptex1 Seed in hex.")
+    String cryptex1Seed;
+
     @Option(names = "--save-path", paramLabel = "<path>",
             description = "Directory to save blobs in. Can use the following variables: " +
                     "$${DeviceIdentifier}, $${BoardConfig}, $${APNonce}, $${Generator}, $${DeviceModel}, $${ECID}, $${FullVersionString}, $${BuildID}, $${MajorVersion} and $${Name} (if using a saved device).")
@@ -121,7 +131,9 @@ public class CLI implements Callable<Void> {
             var tss = new TSS.Builder()
                     .setDevice(device).setEcid(ecid).setSavePath(savePath.getCanonicalPath()).setBoardConfig(boardConfig)
                     .setManualVersion(version.manualVersion).setManualIpswURL(version.manualIpswURL).setApnonce(apnonce)
-                    .setGenerator(generator).setIncludeBetas(version.includeBetas).build();
+                    .setGenerator(generator).setIncludeBetas(version.includeBetas)
+                    .setIncludeCryptex1(includeCryptex1).setCryptex1Nonce(cryptex1Nonce).setCryptex1Seed(cryptex1Seed)
+                    .build();
             System.out.println(success("\n" + tss.call()));
         }
         if (removeDevice != null) {
@@ -132,7 +144,9 @@ public class CLI implements Callable<Void> {
             checkArgs("ecid", "save-path", "identifier");
             var saved = new Prefs.SavedDeviceBuilder(saveDevice)
                     .setIdentifier(device).setEcid(ecid).setSavePath(savePath.getCanonicalPath()).setBoardConfig(boardConfig)
-                    .setApnonce(apnonce).setGenerator(generator).setIncludeBetas(version.includeBetas).save();
+                    .setApnonce(apnonce).setGenerator(generator).setIncludeBetas(version.includeBetas)
+                    .setIncludeCryptex1(includeCryptex1).setCryptex1Nonce(cryptex1Nonce).setCryptex1Seed(cryptex1Seed)
+                    .save();
             System.out.println(success("Saved " + saved + "."));
         }
         if (enableBackground != null) {
